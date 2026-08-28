@@ -1,0 +1,89 @@
+# vrc-mpris-osc — example configuration
+#
+# Copy this file to ~/.config/vrc-mpris-osc/config.toml and adjust it to your
+# liking. Any section or key you omit falls back to the built-in default
+# shown here, so you only need to keep the lines you actually want to change.
+
+# --------------------------------------------------------------------------
+# OSC transport: where VRChat's OSC listener is.
+# --------------------------------------------------------------------------
+[osc]
+# VRChat listens for incoming OSC on 127.0.0.1 by default. Only change this
+# if you're routing OSC through some proxy/bridge.
+host = "127.0.0.1"
+port = 9000
+# The chatbox input endpoint. You shouldn't need to change this.
+address = "/chatbox/input"
+
+# --------------------------------------------------------------------------
+# How the chatbox text is built.
+# --------------------------------------------------------------------------
+[chatbox]
+# Placeholders available: {artist} {title} {album} {status}
+# {status} is currently always "Playing" for non-empty messages.
+template = "🎵 {artist} - {title}"
+
+# Some template ideas:
+# template = "▶ {title} — {artist}"
+# template = "{artist} | {title} | {album}"
+# template = "now playing: {title}"
+
+# Hard cap on the final rendered string length (VRChat's chatbox itself caps
+# around 144 characters). Longer strings are truncated with a trailing "…".
+max_length = 140
+
+# If true, bypasses the chatbox's "person is typing" delay so the message
+# appears immediately.
+send_immediately = true
+
+# If true, VRChat plays its notification sound/animation on every update.
+# Most people find this annoying for frequent track changes, so it's off by
+# default.
+notification = false
+
+# --------------------------------------------------------------------------
+# Player selection and clearing behavior.
+# --------------------------------------------------------------------------
+[behavior]
+# Send an empty string to the chatbox when the selected player is paused.
+clear_on_pause = true
+
+# Send an empty string to the chatbox when no MPRIS player is active at all.
+clear_on_stop = true
+
+# Ordered priority list of MPRIS bus-name fragments (lowercase, matched as a
+# substring of the player's bus name suffix, e.g. "org.mpris.MediaPlayer2.
+# spotify" -> "spotify"). The first *playing* player matching an entry here
+# wins; ties among playing players are broken by this order. Players not
+# listed here are considered last (in whatever order D-Bus reports them).
+#
+# Common bus-name fragments you might see:
+#   spotify, firefox, chromium, chrome, vlc, mpv, rhythmbox, elisa, cider
+player_priority = ["spotify", "firefox", "chromium", "chrome", "vlc"]
+
+# --------------------------------------------------------------------------
+# Rate limiting, to avoid VRChat's chatbox anti-spam throttle.
+# --------------------------------------------------------------------------
+[limiter]
+# Minimum seconds between two OSC sends of the *same* text. A track change
+# (different text) always bypasses this cooldown and is sent immediately.
+# VRChat's own chatbox rate limit is roughly one update every ~2 seconds;
+# 3-5 seconds here leaves headroom.
+cooldown_seconds = 4
+
+# --------------------------------------------------------------------------
+# Extra text cleaning.
+# --------------------------------------------------------------------------
+[cleaner]
+# The built-in cleaner already strips things like:
+#   [Official Video], (Official Music Video), (Lyrics), (Visualizer),
+#   (Remastered 2024), (2024 Remaster), (Audio), [Audio Only],
+#   (Explicit), (Clean), (Radio Edit), (Extended Mix), feat./ft./featuring ...
+#
+# Add your own case-insensitive regular expressions here for anything else
+# you want stripped out of titles/artists/albums. Matches are removed
+# entirely (replaced with nothing).
+extra_patterns = [
+    # "(?i)HD ?Rip",
+    # "(?i)\\bVEVO\\b",
+]

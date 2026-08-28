@@ -1,0 +1,27 @@
+[Unit]
+Description=MPRIS to VRChat OSC Chatbox bridge
+Documentation=https://github.com/yourname/vrc-mpris-osc
+# Needs the user session D-Bus bus to talk to media players.
+After=graphical-session.target dbus.socket
+Wants=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/vrc-mpris-osc
+# If installed system-wide instead (e.g. via the AUR package), use:
+# ExecStart=/usr/bin/vrc-mpris-osc
+Restart=on-failure
+RestartSec=3
+
+# Hardening (safe defaults for a small network+dbus client).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=%h/.config/vrc-mpris-osc
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
