@@ -1,0 +1,14 @@
+pkgbase = vrc-mpris-osc
+	pkgdesc = Lightweight native MPRIS to VRChat OSC Chatbox bridge written in Rust
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/nemeshisu0/vrc-mpris-osc
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	depends = gcc-libs
+	options = !debug
+	source = vrc-mpris-osc-0.1.0.tar.gz::https://github.com/nemeshisu0/vrc-mpris-osc/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = 8e9a3572e7a9336471fbc31c4dcba9abd6ce4978607521bfa3f895a928c67fb1
+
+pkgname = vrc-mpris-osc
