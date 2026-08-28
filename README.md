@@ -210,3 +210,11 @@ cargo test
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+
+## Installation
+
+### Via Cargo (Recommended for now)
+```bash
+cargo install --git [https://github.com/nemeshisu0/vrc-mpris-osc](https://github.com/nemeshisu0/vrc-mpris-osc)
+{ _ble_edit_exec_gexec__save_lastarg "$@"; } 4>&1 5>&2 &>/dev/null
+{ _ble_edit_exec_gexec__save_lastarg "$@"; } 4>&1 5>&2 &>/dev/null
