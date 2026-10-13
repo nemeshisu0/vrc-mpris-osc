@@ -7,9 +7,14 @@ il livello di volume di Spotify e i testi sincronizzati (Lyrics) nella Chatbox d
 
 Funzionalità:
 - Grande pulsante ON / OFF per abilitare/disabilitare l'invio al volo.
-- Supporto testi sincronizzati (Lyrics) da LRCLIB: disattivati di default, attivabili dal launcher.
-- Monitoraggio del livello di volume interno di Spotify in tempo reale.
-- Riconoscimento automatico e sincronizzazione processo VRChat (auto-chiusura opzionale).
+- Selezione modalità Chatbox:
+  * Solo Titolo e Volume
+  * Solo Lyrics (Testo)
+  * Entrambi (Titolo sopra, Lyrics sotto su nuova riga)
+- Supporto testi sincronizzati (Lyrics) via LRCLIB con anteprima in tempo reale.
+- Monitoraggio del livello di volume interno di Spotify.
+- Riconoscimento automatico del processo VRChat e auto-chiusura opzionale.
+- Salvataggio automatico delle impostazioni (QSettings).
 - Nessun processo orfano in background quando chiuso.
 - Supporto toggle da linea di comando / scorciatoia tastiera: `music --toggle`.
 """
@@ -27,17 +32,21 @@ import urllib.request
 import urllib.parse
 import threading
 
-from PyQt6.QtCore import Qt, QTimer, QSocketNotifier
+from PyQt6.QtCore import Qt, QTimer, QSocketNotifier, QSettings
 from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QCheckBox, QFrame, QSizePolicy
+    QPushButton, QLabel, QCheckBox, QFrame, QComboBox, QSizePolicy
 )
 
 PID_FILE = "/tmp/vrc_music_launcher.pid"
 OSC_IP = "127.0.0.1"
 OSC_PORT = 9000
 OSC_ADDR = "/chatbox/input"
+
+MODE_TITLE_ONLY = 0
+MODE_LYRICS_ONLY = 1
+MODE_BOTH = 2
 
 CLEAN_PATTERNS = [
     r'\[\s*(?:official\s+)?(?:music\s+)?video\s*\]',
@@ -181,7 +190,10 @@ class MusicLauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VRChat Music OSC Launcher")
-        self.setFixedSize(420, 590)
+        self.setFixedSize(430, 620)
+
+        # Gestione preferenze persistenti
+        self.settings = QSettings("vrc-mpris-osc", "MusicLauncher")
 
         self.is_on = True
         self.vrchat_detected_once = False
@@ -194,7 +206,6 @@ class MusicLauncherWindow(QMainWindow):
         self.lyrics_cache = {}  # (artist, title): [(ts, text)]
         self.current_lyrics_key = None
         self.current_lyrics_lines = []
-        self.lyrics_status_text = "Nessun brano attivo"
         self.lyrics_fetching = False
 
         # Socket UDP per invio OSC
@@ -248,6 +259,31 @@ class MusicLauncherWindow(QMainWindow):
                 border: 1px solid #313244;
                 border-radius: 12px;
                 padding: 10px;
+            }
+            QComboBox {
+                background-color: #181825;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QComboBox:hover {
+                border: 1px solid #89b4fa;
+            }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #181825;
+                color: #cdd6f4;
+                selection-background-color: #313244;
+                selection-color: #89b4fa;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+                padding: 4px;
             }
             QCheckBox {
                 color: #bac2de;
@@ -323,7 +359,7 @@ class MusicLauncherWindow(QMainWindow):
 
         # 3. Grande Pulsante ON / OFF
         self.toggle_btn = QPushButton()
-        self.toggle_btn.setFixedHeight(72)
+        self.toggle_btn.setFixedHeight(70)
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self.toggle_state)
         main_layout.addWidget(self.toggle_btn)
@@ -366,7 +402,7 @@ class MusicLauncherWindow(QMainWindow):
         lyrics_box_layout = QVBoxLayout(lyrics_box)
         lyrics_box_layout.setContentsMargins(8, 6, 8, 6)
 
-        self.lyrics_preview_label = QLabel("🎤 Lyrics: Disattivate (Spunta la casella sotto per attivarle)")
+        self.lyrics_preview_label = QLabel("🎤 Lyrics: In attesa di riproduzione...")
         self.lyrics_preview_label.setStyleSheet("font-size: 11px; color: #f5c2e7; font-style: italic;")
         self.lyrics_preview_label.setWordWrap(True)
         lyrics_box_layout.addWidget(self.lyrics_preview_label)
@@ -379,34 +415,53 @@ class MusicLauncherWindow(QMainWindow):
 
         main_layout.addWidget(song_card)
 
-        # 5. Opzioni
+        # 5. Selezione Modalità Chatbox (Solo Titolo / Solo Lyrics / Entrambi)
+        mode_layout = QVBoxLayout()
+        mode_layout.setSpacing(4)
+        mode_title = QLabel("MODALITÀ VISUALIZZAZIONE CHATBOX")
+        mode_title.setStyleSheet("font-size: 10px; font-weight: bold; color: #6c7086; letter-spacing: 1px;")
+        mode_layout.addWidget(mode_title)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("🎵 Solo Titolo (con Volume)", MODE_TITLE_ONLY)
+        self.mode_combo.addItem("🎤 Solo Lyrics (Testo)", MODE_LYRICS_ONLY)
+        self.mode_combo.addItem("🎵 + 🎤 Entrambi (Titolo sopra, Lyrics sotto)", MODE_BOTH)
+
+        saved_mode = self.settings.value("chatbox_mode", MODE_TITLE_ONLY, type=int)
+        if 0 <= saved_mode <= 2:
+            self.mode_combo.setCurrentIndex(saved_mode)
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+
+        mode_layout.addWidget(self.mode_combo)
+        main_layout.addLayout(mode_layout)
+
+        # 6. Opzioni Checkbox
         options_layout = QVBoxLayout()
-        options_layout.setSpacing(6)
+        options_layout.setSpacing(5)
 
-        # Checkbox Lyrics: DISATTIVATE DI DEFAULT come richiesto
-        self.show_lyrics_chk = QCheckBox("🎤 Mostra testi sincronizzati (Lyrics) nella Chatbox")
-        self.show_lyrics_chk.setChecked(False)
-        self.show_lyrics_chk.toggled.connect(self.on_option_changed)
-        options_layout.addWidget(self.show_lyrics_chk)
-
-        self.show_volume_chk = QCheckBox("🔊 Mostra livello volume nella Chatbox (es. 🔉 46%)")
-        self.show_volume_chk.setChecked(True)
-        self.show_volume_chk.toggled.connect(self.on_option_changed)
+        saved_vol = self.settings.value("show_volume", True, type=bool)
+        self.show_volume_chk = QCheckBox("🔊 Includi percentuale volume (es. 🔉 46%)")
+        self.show_volume_chk.setChecked(saved_vol)
+        self.show_volume_chk.toggled.connect(self.on_volume_chk_changed)
         options_layout.addWidget(self.show_volume_chk)
 
+        saved_autoclose = self.settings.value("auto_close", True, type=bool)
         self.auto_close_chk = QCheckBox("Chiudi launcher automaticamente all'uscita di VRChat")
-        self.auto_close_chk.setChecked(True)
+        self.auto_close_chk.setChecked(saved_autoclose)
+        self.auto_close_chk.toggled.connect(lambda v: self.settings.setValue("auto_close", v))
         options_layout.addWidget(self.auto_close_chk)
 
+        saved_clear = self.settings.value("clear_on_pause", True, type=bool)
         self.clear_on_pause_chk = QCheckBox("Pulisci chatbox quando metti in pausa o premi OFF")
-        self.clear_on_pause_chk.setChecked(True)
+        self.clear_on_pause_chk.setChecked(saved_clear)
+        self.clear_on_pause_chk.toggled.connect(lambda v: self.settings.setValue("clear_on_pause", v))
         options_layout.addWidget(self.clear_on_pause_chk)
 
         main_layout.addLayout(options_layout)
 
-        # 6. Barra inferiore (Info porta + Esci)
+        # 7. Barra inferiore (Info porta + Esci)
         bottom_layout = QHBoxLayout()
-        bottom_layout.setContentsMargins(0, 4, 0, 0)
+        bottom_layout.setContentsMargins(0, 2, 0, 0)
 
         port_info = QLabel("OSC: 127.0.0.1:9000")
         port_info.setStyleSheet("font-size: 11px; color: #6c7086;")
@@ -462,7 +517,13 @@ class MusicLauncherWindow(QMainWindow):
                 }
             """)
 
-    def on_option_changed(self):
+    def on_mode_changed(self, index):
+        self.settings.setValue("chatbox_mode", index)
+        self.last_sent_text = None
+        self.on_tick()
+
+    def on_volume_chk_changed(self, checked):
+        self.settings.setValue("show_volume", checked)
         self.last_sent_text = None
         self.on_tick()
 
@@ -570,12 +631,6 @@ class MusicLauncherWindow(QMainWindow):
         else:
             self.volume_badge.setVisible(False)
 
-        # Rileva variazione di volume
-        volume_changed = False
-        if vol_pct is not None and self.last_detected_volume != vol_pct:
-            volume_changed = True
-            self.last_detected_volume = vol_pct
-
         current_lyric_line = None
 
         if status:
@@ -595,20 +650,14 @@ class MusicLauncherWindow(QMainWindow):
             current_lyric_line = get_current_lyric_line(self.current_lyrics_lines, pos_sec)
 
             # Aggiorna label anteprima Lyrics
-            if self.show_lyrics_chk.isChecked():
-                if current_lyric_line:
-                    self.lyrics_preview_label.setText(f'🎤 "{current_lyric_line}"')
-                elif self.current_lyrics_lines:
-                    self.lyrics_preview_label.setText("🎤 [Pausa strumentale / Intro]")
-                elif self.lyrics_fetching:
-                    self.lyrics_preview_label.setText("🎤 Ricerca testo in corso...")
-                else:
-                    self.lyrics_preview_label.setText("🎤 Nessun testo sincronizzato disponibile")
+            if current_lyric_line:
+                self.lyrics_preview_label.setText(f'🎤 "{current_lyric_line}"')
+            elif self.current_lyrics_lines:
+                self.lyrics_preview_label.setText("🎤 [Pausa strumentale / Intro]")
+            elif self.lyrics_fetching:
+                self.lyrics_preview_label.setText("🎤 Ricerca testo in corso...")
             else:
-                if current_lyric_line:
-                    self.lyrics_preview_label.setText(f'🎤 [Disattivato] "{current_lyric_line}"')
-                else:
-                    self.lyrics_preview_label.setText("🎤 Lyrics: Disattivate (Spunta la casella sotto per attivarle)")
+                self.lyrics_preview_label.setText("🎤 Nessun testo sincronizzato disponibile")
         else:
             self.track_label.setText("Nessun brano attivo")
             self.player_label.setText("Player: Non rilevato")
@@ -630,14 +679,40 @@ class MusicLauncherWindow(QMainWindow):
             clean_a = clean_text(artist) if artist else ""
             song_part = f"{clean_t} - {clean_a}" if clean_a else clean_t
 
-            # Determina il messaggio Chatbox: Lyrics o Titolo brano
-            if self.show_lyrics_chk.isChecked() and current_lyric_line:
-                osc_msg = f"🎤 {current_lyric_line}"
+            # Formattazione base del titolo con eventuale volume
+            if self.show_volume_chk.isChecked() and vol_text:
+                title_msg = f"🎵 {song_part} [{vol_text}]"
             else:
-                if self.show_volume_chk.isChecked() and vol_text:
-                    osc_msg = f"🎵 {song_part} [{vol_text}]"
+                title_msg = f"🎵 {song_part}"
+
+            mode = self.mode_combo.currentIndex()
+
+            if mode == MODE_TITLE_ONLY:
+                osc_msg = title_msg
+            elif mode == MODE_LYRICS_ONLY:
+                if current_lyric_line:
+                    osc_msg = f"🎤 {current_lyric_line}"
                 else:
-                    osc_msg = f"🎵 {song_part}"
+                    osc_msg = title_msg
+            elif mode == MODE_BOTH:
+                if current_lyric_line:
+                    # Titolo sopra, Lyrics sotto
+                    line1 = title_msg
+                    line2 = f"🎤 {current_lyric_line}"
+                    combined = f"{line1}\n{line2}"
+                    if len(combined) <= 140:
+                        osc_msg = combined
+                    else:
+                        avail = 140 - len(line1) - 2
+                        if avail > 15:
+                            line2 = line2[:avail - 1] + "…"
+                            osc_msg = f"{line1}\n{line2}"
+                        else:
+                            osc_msg = combined[:137] + "…"
+                else:
+                    osc_msg = title_msg
+            else:
+                osc_msg = title_msg
 
             if len(osc_msg) > 140:
                 osc_msg = osc_msg[:137] + "..."
@@ -646,7 +721,7 @@ class MusicLauncherWindow(QMainWindow):
             text_changed = (osc_msg != self.last_sent_text)
             cooldown_passed = (now - self.last_sent_time >= self.cooldown)
 
-            # Invia se il testo è cambiato (es. nuova riga lyrics, cambio volume) o dopo cooldown
+            # Invia se il testo è cambiato (nuova riga lyrics, cambio volume) o dopo cooldown
             if text_changed or cooldown_passed:
                 # Rate limit minimo per VRChat (1.4s tra un invio e l'altro)
                 if text_changed and (now - self.last_sent_time < 1.4):
@@ -655,7 +730,10 @@ class MusicLauncherWindow(QMainWindow):
                 self.send_chatbox(osc_msg)
                 self.last_sent_text = osc_msg
                 self.last_sent_time = now
-                self.osc_status_label.setText(f"Inviato: {osc_msg}")
+
+                # Mostra anteprima compatta nello stato
+                display_status = osc_msg.replace('\n', ' ⮑  ')
+                self.osc_status_label.setText(f"Inviato: {display_status}")
         else:
             # Musica in pausa o ferma
             if self.last_sent_text is not None:
@@ -715,9 +793,9 @@ def main():
             sys.exit(0)
         elif arg in ('--help', '-h'):
             print("Uso: music [OPZIONI]")
-            print("  (senza opzioni)    Apre il mini-launcher grafico con pulsante ON/OFF, volume e lyrics")
+            print("  (senza opzioni)    Apre il mini-launcher grafico con opzioni Titolo / Lyrics / Entrambi")
             print("  --toggle, -t       Abilita o disabilita al volo il launcher già aperto")
-            print("  --status, -s       Mostra lo stato di VRChat, della musica, del volume e della posizione")
+            print("  --status, -s       Mostra lo stato di VRChat, musica, volume e posizione")
             print("  --help, -h         Mostra questo messaggio di aiuto")
             sys.exit(0)
 
