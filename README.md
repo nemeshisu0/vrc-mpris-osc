@@ -128,7 +128,7 @@ port = 9000
 address = "/chatbox/input"
 
 [chatbox]
-template = "🎵 {artist} - {title}"   # {artist} {title} {album} {status}
+template = "🎵 {artist} - {title}"   # {artist} {title} {album} {status} {volume}
 max_length = 140
 send_immediately = true
 notification = false
@@ -207,14 +207,32 @@ cargo test
   in `config.toml`.
 - **Getting spam-limited by VRChat** — raise `limiter.cooldown_seconds`.
 
+## Installation
+
+### Via Cargo
+```bash
+cargo install --git https://github.com/nemeshisu0/vrc-mpris-osc
+```
+
+## GUI Mini-Launcher (PyQt6)
+
+If you prefer a visual window with an **ON / OFF** toggle button instead of a daemon service:
+
+```bash
+python3 vrc-music-launcher.py
+```
+
+### Key Features:
+- **Big ON / OFF switch**: Enable or disable chatbox broadcasts on the fly with a single click. When turned OFF, it clears the chatbox instantly.
+- **Spotify Internal Volume**: Dynamically detects and displays your Spotify volume level (`🔇`, `🔈`, `🔉`, `🔊`) in both the launcher and the VRChat chatbox.
+- **VRChat Process Sync**: Automatically detects when `VRChat.exe` is running, stays idle when the game is closed, and automatically exits when you quit VRChat.
+- **Zero background leftovers**: Clean process and socket termination when closed.
+- **CLI / Hotkey Toggle**: Toggle the launcher remotely while in VR by running:
+  ```bash
+  python3 vrc-music-launcher.py --toggle
+  ```
+  *(Compatible with Hyprland, Sway, i3, or KDE global shortcuts!)*
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
-
-## Installation
-
-### Via Cargo (Recommended for now)
-```bash
-cargo install --git [https://github.com/nemeshisu0/vrc-mpris-osc](https://github.com/nemeshisu0/vrc-mpris-osc)
-{ _ble_edit_exec_gexec__save_lastarg "$@"; } 4>&1 5>&2 &>/dev/null
-{ _ble_edit_exec_gexec__save_lastarg "$@"; } 4>&1 5>&2 &>/dev/null

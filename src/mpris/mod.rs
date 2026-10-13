@@ -42,6 +42,7 @@ pub struct PlayerInfo {
     pub artist: String,
     pub title: String,
     pub album: String,
+    pub volume: Option<f64>,
 }
 
 impl PlayerInfo {
@@ -118,6 +119,9 @@ pub async fn fetch_player(conn: &Connection, bus_name: &str) -> Result<PlayerInf
     let title = extract_string(&metadata, "xesam:title");
     let album = extract_string(&metadata, "xesam:album");
     let artist = extract_artist(&metadata);
+    let volume = props
+        .get("Volume")
+        .and_then(|v| f64::try_from(v.clone()).ok());
 
     Ok(PlayerInfo {
         bus_name: bus_name.to_string(),
@@ -125,7 +129,25 @@ pub async fn fetch_player(conn: &Connection, bus_name: &str) -> Result<PlayerInf
         artist,
         title,
         album,
+        volume,
     })
+}
+
+/// Formats an MPRIS volume (0.0..=1.0) into a chatbox badge (e.g. "🔉 46%").
+pub fn format_volume_badge(volume: Option<f64>) -> String {
+    match volume {
+        None => String::new(),
+        Some(v) => {
+            let pct = (v * 100.0).round().clamp(0.0, 100.0) as u32;
+            let icon = match pct {
+                0 => "🔇",
+                1..=32 => "🔈",
+                33..=66 => "🔉",
+                _ => "🔊",
+            };
+            format!("{icon} {pct}%")
+        }
+    }
 }
 
 /// Fetches info for every active MPRIS player currently on the bus.
@@ -236,6 +258,7 @@ mod tests {
             artist: "Artist".into(),
             title: "Title".into(),
             album: "Album".into(),
+            volume: None,
         }
     }
 

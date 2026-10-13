@@ -19,8 +19,9 @@ address = "/chatbox/input"
 # How the chatbox text is built.
 # --------------------------------------------------------------------------
 [chatbox]
-# Placeholders available: {artist} {title} {album} {status}
+# Placeholders available: {artist} {title} {album} {status} {volume}
 # {status} is currently always "Playing" for non-empty messages.
+# {volume} displays the player's internal volume (e.g. "🔉 46%").
 template = "🎵 {artist} - {title}"
 
 # Some template ideas:

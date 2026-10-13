@@ -141,13 +141,15 @@ pub fn render_template(
     title: &str,
     album: &str,
     status: &str,
+    volume: &str,
     max_len: usize,
 ) -> String {
     let rendered = template
         .replace("{artist}", artist)
         .replace("{title}", title)
         .replace("{album}", album)
-        .replace("{status}", status);
+        .replace("{status}", status)
+        .replace("{volume}", volume);
     let rendered = WHITESPACE.replace_all(rendered.trim(), " ").to_string();
     truncate(&rendered, max_len)
 }
@@ -305,15 +307,30 @@ mod tests {
             "Bohemian Rhapsody",
             "A Night at the Opera",
             "Playing",
+            "🔊 50%",
             140,
         );
         assert_eq!(out, "🎵 Queen - Bohemian Rhapsody");
     }
 
     #[test]
+    fn render_template_with_volume() {
+        let out = render_template(
+            "🎵 {artist} - {title} [{volume}]",
+            "Queen",
+            "Bohemian Rhapsody",
+            "A Night at the Opera",
+            "Playing",
+            "🔊 50%",
+            140,
+        );
+        assert_eq!(out, "🎵 Queen - Bohemian Rhapsody [🔊 50%]");
+    }
+
+    #[test]
     fn render_template_truncates_long_output() {
         let long_title = "A".repeat(200);
-        let out = render_template("{title}", "", &long_title, "", "", 140);
+        let out = render_template("{title}", "", &long_title, "", "", "", 140);
         assert_eq!(out.chars().count(), 140);
         assert!(out.ends_with('…'));
     }

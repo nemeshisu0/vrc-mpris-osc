@@ -160,12 +160,14 @@ async fn evaluate_and_send(
             let title = cleaner::clean_title(&player.title, &player.artist, &cfg.cleaner.extra_patterns);
             let album = cleaner::clean_field(&player.album, &cfg.cleaner.extra_patterns);
             let status = "Playing";
+            let volume = mpris::format_volume_badge(player.volume);
             cleaner::render_template(
                 &cfg.chatbox.template,
                 &artist,
                 &title,
                 &album,
                 status,
+                &volume,
                 cfg.chatbox.max_length,
             )
         }
