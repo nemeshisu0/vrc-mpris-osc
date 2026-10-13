@@ -2,15 +2,14 @@
 """
 VRChat Music OSC Launcher
 =========================
-Mini launcher grafico per trasmettere il brano in riproduzione (Spotify, browser, MPRIS)
-e il livello di volume di Spotify nella Chatbox di VRChat via OSC (127.0.0.1:9000).
+Mini launcher grafico per trasmettere il brano in riproduzione (Spotify, browser, MPRIS),
+il livello di volume di Spotify e i testi sincronizzati (Lyrics) nella Chatbox di VRChat via OSC (127.0.0.1:9000).
 
 Funzionalità:
 - Grande pulsante ON / OFF per abilitare/disabilitare l'invio al volo.
+- Supporto testi sincronizzati (Lyrics) da LRCLIB: disattivati di default, attivabili dal launcher.
 - Monitoraggio del livello di volume interno di Spotify in tempo reale.
-- Aggiornamento immediato della Chatbox e dell'interfaccia quando modifichi il volume.
-- Si attiva solo quando VRChat è in esecuzione.
-- Chiusura automatica pulita quando esci da VRChat (opzionale, attiva di default).
+- Riconoscimento automatico e sincronizzazione processo VRChat (auto-chiusura opzionale).
 - Nessun processo orfano in background quando chiuso.
 - Supporto toggle da linea di comando / scorciatoia tastiera: `music --toggle`.
 """
@@ -23,6 +22,10 @@ import socket
 import signal
 import subprocess
 import atexit
+import json
+import urllib.request
+import urllib.parse
+import threading
 
 from PyQt6.QtCore import Qt, QTimer, QSocketNotifier
 from PyQt6.QtGui import QFont, QColor
@@ -85,6 +88,32 @@ def format_volume(vol_str):
         return "", None
 
 
+def parse_lrc(lrc_text: str):
+    if not lrc_text:
+        return []
+    lines = []
+    pattern = re.compile(r'\[(\d+):(\d+(?:\.\d+)?)\](.*)')
+    for line in lrc_text.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            total_sec = int(match.group(1)) * 60 + float(match.group(2))
+            text = match.group(3).strip()
+            lines.append((total_sec, text))
+    return sorted(lines, key=lambda x: x[0])
+
+
+def get_current_lyric_line(lyrics_list, pos_sec):
+    if not lyrics_list or pos_sec is None:
+        return None
+    current = None
+    for ts, text in lyrics_list:
+        if ts <= pos_sec:
+            current = text
+        else:
+            break
+    return current
+
+
 def osc_pad(b: bytes) -> bytes:
     return b + b'\x00' * ((4 - len(b) % 4) % 4)
 
@@ -121,16 +150,19 @@ def is_vrchat_running():
 
 def get_player_metadata():
     try:
-        cmd = ['playerctl', '-p', 'spotify,%any', 'metadata', '--format', '{{volume}}|{{status}}|{{playerName}}|{{artist}}|{{title}}']
+        cmd = ['playerctl', '-p', 'spotify,%any', 'metadata', '--format', '{{volume}}|{{status}}|{{playerName}}|{{artist}}|{{title}}|{{position}}']
         res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8').strip()
         if not res:
-            return None, None, None, None, None
-        parts = res.split('|', 4)
-        if len(parts) == 5:
-            return parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip()
+            return None, None, None, None, None, None
+        parts = res.split('|', 5)
+        if len(parts) == 6:
+            pos_sec = None
+            if parts[5].strip().isdigit():
+                pos_sec = float(parts[5].strip()) / 1_000_000.0
+            return parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip(), pos_sec
     except Exception:
         pass
-    return None, None, None, None, None
+    return None, None, None, None, None, None
 
 
 def get_running_launcher_pid():
@@ -149,7 +181,7 @@ class MusicLauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VRChat Music OSC Launcher")
-        self.setFixedSize(410, 540)
+        self.setFixedSize(420, 590)
 
         self.is_on = True
         self.vrchat_detected_once = False
@@ -157,6 +189,13 @@ class MusicLauncherWindow(QMainWindow):
         self.last_sent_time = 0.0
         self.cooldown = 4.0
         self.last_detected_volume = None
+
+        # Gestione Lyrics
+        self.lyrics_cache = {}  # (artist, title): [(ts, text)]
+        self.current_lyrics_key = None
+        self.current_lyrics_lines = []
+        self.lyrics_status_text = "Nessun brano attivo"
+        self.lyrics_fetching = False
 
         # Socket UDP per invio OSC
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -167,10 +206,10 @@ class MusicLauncherWindow(QMainWindow):
         self.setup_ui()
         self.update_toggle_button_ui()
 
-        # Timer principale (controlla VRChat, musica e volume ogni secondo)
+        # Timer principale (controlla VRChat, musica, volume e lyrics ogni 800ms)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
-        self.timer.start(1000)
+        self.timer.start(800)
 
         # Esegui subito il primo controllo
         self.on_tick()
@@ -246,20 +285,26 @@ class MusicLauncherWindow(QMainWindow):
                 padding: 3px 8px;
                 border-radius: 6px;
             }
+            QFrame.lyricsBox {
+                background-color: #11111b;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }
         """)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(18, 16, 18, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(18, 14, 18, 14)
+        main_layout.setSpacing(10)
 
         # 1. Header
         header_layout = QVBoxLayout()
         header_layout.setSpacing(2)
         title_label = QLabel("🎵 VRChat Music OSC")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #cdd6f4;")
-        subtitle_label = QLabel("Condividi musica e volume nella Chatbox di VRChat")
+        subtitle_label = QLabel("Musica, Volume e Testi (Lyrics) nella Chatbox di VRChat")
         subtitle_label.setStyleSheet("font-size: 11px; color: #a6adc8;")
         header_layout.addWidget(title_label)
         header_layout.addWidget(subtitle_label)
@@ -278,16 +323,16 @@ class MusicLauncherWindow(QMainWindow):
 
         # 3. Grande Pulsante ON / OFF
         self.toggle_btn = QPushButton()
-        self.toggle_btn.setFixedHeight(75)
+        self.toggle_btn.setFixedHeight(72)
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self.toggle_state)
         main_layout.addWidget(self.toggle_btn)
 
-        # 4. Scheda Brano Corrente (Now Playing + Volume)
+        # 4. Scheda Brano Corrente (Now Playing + Volume + Lyrics Preview)
         song_card = QFrame()
         song_card.setProperty("class", "card")
         song_card_layout = QVBoxLayout(song_card)
-        song_card_layout.setContentsMargins(12, 12, 12, 12)
+        song_card_layout.setContentsMargins(12, 10, 12, 10)
         song_card_layout.setSpacing(6)
 
         card_title = QLabel("BRANO IN RIPRODUZIONE")
@@ -315,6 +360,19 @@ class MusicLauncherWindow(QMainWindow):
 
         song_card_layout.addLayout(player_row)
 
+        # Box per Anteprima Testo (Lyrics)
+        lyrics_box = QFrame()
+        lyrics_box.setProperty("class", "lyricsBox")
+        lyrics_box_layout = QVBoxLayout(lyrics_box)
+        lyrics_box_layout.setContentsMargins(8, 6, 8, 6)
+
+        self.lyrics_preview_label = QLabel("🎤 Lyrics: Disattivate (Spunta la casella sotto per attivarle)")
+        self.lyrics_preview_label.setStyleSheet("font-size: 11px; color: #f5c2e7; font-style: italic;")
+        self.lyrics_preview_label.setWordWrap(True)
+        lyrics_box_layout.addWidget(self.lyrics_preview_label)
+
+        song_card_layout.addWidget(lyrics_box)
+
         self.osc_status_label = QLabel("Stato Chatbox: In attesa")
         self.osc_status_label.setStyleSheet("font-size: 11px; color: #a6adc8; font-style: italic;")
         song_card_layout.addWidget(self.osc_status_label)
@@ -323,9 +381,15 @@ class MusicLauncherWindow(QMainWindow):
 
         # 5. Opzioni
         options_layout = QVBoxLayout()
-        options_layout.setSpacing(7)
+        options_layout.setSpacing(6)
 
-        self.show_volume_chk = QCheckBox("Mostra livello volume nella Chatbox (es. 🔉 46%)")
+        # Checkbox Lyrics: DISATTIVATE DI DEFAULT come richiesto
+        self.show_lyrics_chk = QCheckBox("🎤 Mostra testi sincronizzati (Lyrics) nella Chatbox")
+        self.show_lyrics_chk.setChecked(False)
+        self.show_lyrics_chk.toggled.connect(self.on_option_changed)
+        options_layout.addWidget(self.show_lyrics_chk)
+
+        self.show_volume_chk = QCheckBox("🔊 Mostra livello volume nella Chatbox (es. 🔉 46%)")
         self.show_volume_chk.setChecked(True)
         self.show_volume_chk.toggled.connect(self.on_option_changed)
         options_layout.addWidget(self.show_volume_chk)
@@ -399,7 +463,6 @@ class MusicLauncherWindow(QMainWindow):
             """)
 
     def on_option_changed(self):
-        # Forza invio immediato al cambio impostazione se attivo
         self.last_sent_text = None
         self.on_tick()
 
@@ -414,6 +477,56 @@ class MusicLauncherWindow(QMainWindow):
             self.osc_status_label.setText("Stato Chatbox: Attivato (ON)")
             self.last_sent_text = None
             self.on_tick()
+
+    def fetch_lyrics_async(self, artist: str, title: str):
+        key = (artist.lower().strip(), title.lower().strip())
+        if key in self.lyrics_cache:
+            self.current_lyrics_key = key
+            self.current_lyrics_lines = self.lyrics_cache[key]
+            return
+
+        if self.lyrics_fetching:
+            return
+
+        self.current_lyrics_key = key
+        self.current_lyrics_lines = []
+        self.lyrics_fetching = True
+
+        def worker():
+            lrc_text = None
+            try:
+                params = urllib.parse.urlencode({'track_name': title, 'artist_name': artist})
+                url = f"https://lrclib.net/api/get?{params}"
+                req = urllib.request.Request(url, headers={'User-Agent': 'vrc-mpris-osc/0.1.0'})
+                with urllib.request.urlopen(req, timeout=3.5) as resp:
+                    data = json.loads(resp.read().decode())
+                    if data.get('syncedLyrics'):
+                        lrc_text = data['syncedLyrics']
+            except Exception:
+                pass
+
+            if not lrc_text:
+                try:
+                    q = urllib.parse.urlencode({'q': f"{artist} {title}"})
+                    url = f"https://lrclib.net/api/search?{q}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'vrc-mpris-osc/0.1.0'})
+                    with urllib.request.urlopen(req, timeout=3.5) as resp:
+                        results = json.loads(resp.read().decode())
+                        if isinstance(results, list):
+                            for item in results:
+                                if item.get('syncedLyrics'):
+                                    lrc_text = item['syncedLyrics']
+                                    break
+                except Exception:
+                    pass
+
+            parsed = parse_lrc(lrc_text) if lrc_text else []
+            self.lyrics_cache[key] = parsed
+            if self.current_lyrics_key == key:
+                self.current_lyrics_lines = parsed
+            self.lyrics_fetching = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def send_chatbox(self, text: str):
         try:
@@ -446,8 +559,8 @@ class MusicLauncherWindow(QMainWindow):
                 QTimer.singleShot(1000, self.close)
                 return
 
-        # Leggi stato da playerctl (volume, status, player, artist, title)
-        vol_str, status, player, artist, title = get_player_metadata()
+        # Leggi stato da playerctl (volume, status, player, artist, title, position)
+        vol_str, status, player, artist, title, pos_sec = get_player_metadata()
         vol_text, vol_pct = format_volume(vol_str)
 
         # Aggiorna badge volume
@@ -463,6 +576,8 @@ class MusicLauncherWindow(QMainWindow):
             volume_changed = True
             self.last_detected_volume = vol_pct
 
+        current_lyric_line = None
+
         if status:
             clean_t = clean_text(title)
             clean_a = clean_text(artist) if artist else ""
@@ -471,11 +586,35 @@ class MusicLauncherWindow(QMainWindow):
             icon = "▶" if status.lower() == "playing" else "⏸"
             self.track_label.setText(f"{icon} {display_title}")
             self.player_label.setText(f"Player: {player.capitalize()} ({status.capitalize()})")
+
+            # Recupera lyrics per il brano corrente
+            key = (clean_a.lower().strip(), clean_t.lower().strip())
+            if self.current_lyrics_key != key:
+                self.fetch_lyrics_async(clean_a, clean_t)
+
+            current_lyric_line = get_current_lyric_line(self.current_lyrics_lines, pos_sec)
+
+            # Aggiorna label anteprima Lyrics
+            if self.show_lyrics_chk.isChecked():
+                if current_lyric_line:
+                    self.lyrics_preview_label.setText(f'🎤 "{current_lyric_line}"')
+                elif self.current_lyrics_lines:
+                    self.lyrics_preview_label.setText("🎤 [Pausa strumentale / Intro]")
+                elif self.lyrics_fetching:
+                    self.lyrics_preview_label.setText("🎤 Ricerca testo in corso...")
+                else:
+                    self.lyrics_preview_label.setText("🎤 Nessun testo sincronizzato disponibile")
+            else:
+                if current_lyric_line:
+                    self.lyrics_preview_label.setText(f'🎤 [Disattivato] "{current_lyric_line}"')
+                else:
+                    self.lyrics_preview_label.setText("🎤 Lyrics: Disattivate (Spunta la casella sotto per attivarle)")
         else:
             self.track_label.setText("Nessun brano attivo")
             self.player_label.setText("Player: Non rilevato")
+            self.lyrics_preview_label.setText("🎤 Lyrics: In attesa di riproduzione...")
 
-        # Se il pulsante è su OFF
+        # Se il pulsante principale è su OFF
         if not self.is_on:
             return
 
@@ -491,11 +630,14 @@ class MusicLauncherWindow(QMainWindow):
             clean_a = clean_text(artist) if artist else ""
             song_part = f"{clean_t} - {clean_a}" if clean_a else clean_t
 
-            # Aggiungi indicazione volume se abilitata
-            if self.show_volume_chk.isChecked() and vol_text:
-                osc_msg = f"🎵 {song_part} [{vol_text}]"
+            # Determina il messaggio Chatbox: Lyrics o Titolo brano
+            if self.show_lyrics_chk.isChecked() and current_lyric_line:
+                osc_msg = f"🎤 {current_lyric_line}"
             else:
-                osc_msg = f"🎵 {song_part}"
+                if self.show_volume_chk.isChecked() and vol_text:
+                    osc_msg = f"🎵 {song_part} [{vol_text}]"
+                else:
+                    osc_msg = f"🎵 {song_part}"
 
             if len(osc_msg) > 140:
                 osc_msg = osc_msg[:137] + "..."
@@ -504,12 +646,10 @@ class MusicLauncherWindow(QMainWindow):
             text_changed = (osc_msg != self.last_sent_text)
             cooldown_passed = (now - self.last_sent_time >= self.cooldown)
 
-            # Invia se il testo è cambiato (nuovo brano o cambio volume dopo almeno 1.2s) o per cooldown periodico
+            # Invia se il testo è cambiato (es. nuova riga lyrics, cambio volume) o dopo cooldown
             if text_changed or cooldown_passed:
-                # Protezione anti-spam se il volume cambia molto in fretta (slider mosso a mano)
-                if not text_changed and not cooldown_passed:
-                    return
-                if text_changed and (now - self.last_sent_time < 1.2):
+                # Rate limit minimo per VRChat (1.4s tra un invio e l'altro)
+                if text_changed and (now - self.last_sent_time < 1.4):
                     return
 
                 self.send_chatbox(osc_msg)
@@ -564,18 +704,20 @@ def main():
                 sys.exit(1)
         elif arg in ('--status', '-s'):
             running, pid = is_vrchat_running()
-            vol, st, pl, ar, ti = get_player_metadata()
+            vol, st, pl, ar, ti, pos = get_player_metadata()
             vol_text, _ = format_volume(vol)
             print(f"VRChat: {'Attivo (PID ' + str(pid) + ')' if running else 'Non aperto'}")
             print(f"Musica: {ti} - {ar} [{st}] ({pl})")
             if vol_text:
                 print(f"Volume {pl}: {vol_text}")
+            if pos is not None:
+                print(f"Posizione: {pos:.1f}s")
             sys.exit(0)
         elif arg in ('--help', '-h'):
             print("Uso: music [OPZIONI]")
-            print("  (senza opzioni)    Apre il mini-launcher grafico con pulsante ON/OFF e volume Spotify")
+            print("  (senza opzioni)    Apre il mini-launcher grafico con pulsante ON/OFF, volume e lyrics")
             print("  --toggle, -t       Abilita o disabilita al volo il launcher già aperto")
-            print("  --status, -s       Mostra lo stato di VRChat, della musica e del volume")
+            print("  --status, -s       Mostra lo stato di VRChat, della musica, del volume e della posizione")
             print("  --help, -h         Mostra questo messaggio di aiuto")
             sys.exit(0)
 

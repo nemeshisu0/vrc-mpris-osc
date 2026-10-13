@@ -224,6 +224,7 @@ python3 vrc-music-launcher.py
 
 ### Key Features:
 - **Big ON / OFF switch**: Enable or disable chatbox broadcasts on the fly with a single click. When turned OFF, it clears the chatbox instantly.
+- **Synchronized Lyrics (LRCLIB)**: Real-time synced karaoke lyrics streamed line-by-line to VRChat chatbox (disabled by default, toggleable in the launcher with live preview).
 - **Spotify Internal Volume**: Dynamically detects and displays your Spotify volume level (`🔇`, `🔈`, `🔉`, `🔊`) in both the launcher and the VRChat chatbox.
 - **VRChat Process Sync**: Automatically detects when `VRChat.exe` is running, stays idle when the game is closed, and automatically exits when you quit VRChat.
 - **Zero background leftovers**: Clean process and socket termination when closed.
