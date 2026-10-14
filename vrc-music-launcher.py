@@ -11,7 +11,9 @@ Funzionalità:
   * Solo Titolo e Volume
   * Solo Lyrics (Testo)
   * Entrambi (Titolo sopra, Lyrics sotto su nuova riga)
-- Supporto testi sincronizzati (Lyrics) via LRCLIB con anteprima in tempo reale.
+- Supporto testi ibrido:
+  1. Testi sincronizzati ufficiali con timestamp precisi (priorità assoluta, non modificati).
+  2. Fallback automatico su testi semplici (LRCLIB & Genius) con auto-timing distribuito sulla durata del brano.
 - Monitoraggio del livello di volume interno di Spotify.
 - Riconoscimento automatico del processo VRChat e auto-chiusura opzionale.
 - Salvataggio automatico delle impostazioni (QSettings).
@@ -31,6 +33,7 @@ import json
 import urllib.request
 import urllib.parse
 import threading
+import html
 
 from PyQt6.QtCore import Qt, QTimer, QSocketNotifier, QSettings
 from PyQt6.QtGui import QFont, QColor
@@ -111,6 +114,69 @@ def parse_lrc(lrc_text: str):
     return sorted(lines, key=lambda x: x[0])
 
 
+def auto_time_lyrics(plain_text: str, duration_sec: float = None):
+    """
+    Fallback: distribuisce proporzionalmente un testo semplice (non sincronizzato)
+    lungo la durata totale del brano, lasciando pause naturali per intro e outro.
+    """
+    if not plain_text:
+        return []
+    raw_lines = [l.strip() for l in plain_text.splitlines() if l.strip()]
+    lines = []
+    for l in raw_lines:
+        if l.startswith('[') and l.endswith(']'):
+            continue
+        if 'contributors' in l.lower() or ('lyrics' in l.lower() and len(l) < 25):
+            continue
+        lines.append(l)
+
+    if not lines:
+        return []
+
+    n = len(lines)
+    if duration_sec and duration_sec > 15:
+        # Intro dal 5% della canzone (max 10s), Outro al 95%
+        start_time = min(10.0, duration_sec * 0.05)
+        end_time = max(start_time + 10.0, duration_sec * 0.95)
+        span = end_time - start_time
+        return [(start_time + (i / n) * span, text) for i, text in enumerate(lines)]
+    else:
+        # Pacing stimato di default a 3.5s a riga
+        return [(i * 3.5, text) for i, text in enumerate(lines)]
+
+
+def fetch_genius_lyrics(artist: str, title: str):
+    """Cerca e scarica il testo completo da Genius per brani senza lyrics su LRCLIB."""
+    query = f"{artist} {title}"
+    url = "https://genius.com/api/search/multi?q=" + urllib.parse.quote(query)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'})
+        with urllib.request.urlopen(req, timeout=3.5) as r:
+            data = json.loads(r.read().decode())
+            song_url = None
+            for s in data.get('response', {}).get('sections', []):
+                if s.get('type') == 'song':
+                    hits = s.get('hits', [])
+                    if hits:
+                        song_url = hits[0].get('result', {}).get('url')
+                        break
+        if not song_url:
+            return None
+
+        req2 = urllib.request.Request(song_url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'})
+        with urllib.request.urlopen(req2, timeout=3.5) as r2:
+            page_html = r2.read().decode('utf-8', errors='ignore')
+            containers = re.findall(r'<div[^>]*data-lyrics-container=\"true\"[^>]*>(.*?)</div>', page_html, re.DOTALL)
+            if not containers:
+                return None
+            text = '\n'.join(containers)
+            text = re.sub(r'<br\s*/?>', '\n', text)
+            text = re.sub(r'<[^>]+>', '', text)
+            return html.unescape(text)
+    except Exception:
+        return None
+
+
 def get_current_lyric_line(lyrics_list, pos_sec):
     if not lyrics_list or pos_sec is None:
         return None
@@ -159,19 +225,22 @@ def is_vrchat_running():
 
 def get_player_metadata():
     try:
-        cmd = ['playerctl', '-p', 'spotify,%any', 'metadata', '--format', '{{volume}}|{{status}}|{{playerName}}|{{artist}}|{{title}}|{{position}}']
+        cmd = ['playerctl', '-p', 'spotify,%any', 'metadata', '--format', '{{volume}}|{{status}}|{{playerName}}|{{artist}}|{{title}}|{{position}}|{{mpris:length}}']
         res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8').strip()
         if not res:
-            return None, None, None, None, None, None
-        parts = res.split('|', 5)
-        if len(parts) == 6:
+            return None, None, None, None, None, None, None
+        parts = res.split('|', 6)
+        if len(parts) == 7:
             pos_sec = None
             if parts[5].strip().isdigit():
                 pos_sec = float(parts[5].strip()) / 1_000_000.0
-            return parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip(), pos_sec
+            len_sec = None
+            if parts[6].strip().isdigit():
+                len_sec = float(parts[6].strip()) / 1_000_000.0
+            return parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip(), pos_sec, len_sec
     except Exception:
         pass
-    return None, None, None, None, None, None
+    return None, None, None, None, None, None, None
 
 
 def get_running_launcher_pid():
@@ -203,9 +272,10 @@ class MusicLauncherWindow(QMainWindow):
         self.last_detected_volume = None
 
         # Gestione Lyrics
-        self.lyrics_cache = {}  # (artist, title): [(ts, text)]
+        self.lyrics_cache = {}  # (artist, title): (lines, source_type)
         self.current_lyrics_key = None
         self.current_lyrics_lines = []
+        self.current_lyrics_source = "NONE"
         self.lyrics_fetching = False
 
         # Socket UDP per invio OSC
@@ -539,11 +609,18 @@ class MusicLauncherWindow(QMainWindow):
             self.last_sent_text = None
             self.on_tick()
 
-    def fetch_lyrics_async(self, artist: str, title: str):
+    def fetch_lyrics_hybrid_async(self, artist: str, title: str, duration_sec: float = None):
+        """
+        Sistema di ricerca a cascata:
+        1. Priorità assoluta a syncedLyrics originali di LRCLIB (mantenute intatte al 100%).
+        2. Se assenti, cerca syncedLyrics nei risultati di ricerca.
+        3. Se assenti, recupera plainLyrics da LRCLIB e le sincronizza col minutaggio del brano.
+        4. Se ancora assenti, cerca il testo su Genius e lo sincronizza col minutaggio.
+        """
         key = (artist.lower().strip(), title.lower().strip())
         if key in self.lyrics_cache:
             self.current_lyrics_key = key
-            self.current_lyrics_lines = self.lyrics_cache[key]
+            self.current_lyrics_lines, self.current_lyrics_source = self.lyrics_cache[key]
             return
 
         if self.lyrics_fetching:
@@ -551,10 +628,14 @@ class MusicLauncherWindow(QMainWindow):
 
         self.current_lyrics_key = key
         self.current_lyrics_lines = []
+        self.current_lyrics_source = "SEARCHING"
         self.lyrics_fetching = True
 
         def worker():
-            lrc_text = None
+            synced_lrc = None
+            plain_lrc = None
+
+            # --- STEP 1: LRCLIB match esatto per syncedLyrics (massima precisione) ---
             try:
                 params = urllib.parse.urlencode({'track_name': title, 'artist_name': artist})
                 url = f"https://lrclib.net/api/get?{params}"
@@ -562,11 +643,14 @@ class MusicLauncherWindow(QMainWindow):
                 with urllib.request.urlopen(req, timeout=3.5) as resp:
                     data = json.loads(resp.read().decode())
                     if data.get('syncedLyrics'):
-                        lrc_text = data['syncedLyrics']
+                        synced_lrc = data['syncedLyrics']
+                    elif data.get('plainLyrics'):
+                        plain_lrc = data['plainLyrics']
             except Exception:
                 pass
 
-            if not lrc_text:
+            # --- STEP 2: LRCLIB ricerca libera (privilegiando sempre syncedLyrics) ---
+            if not synced_lrc:
                 try:
                     q = urllib.parse.urlencode({'q': f"{artist} {title}"})
                     url = f"https://lrclib.net/api/search?{q}"
@@ -576,15 +660,55 @@ class MusicLauncherWindow(QMainWindow):
                         if isinstance(results, list):
                             for item in results:
                                 if item.get('syncedLyrics'):
-                                    lrc_text = item['syncedLyrics']
+                                    synced_lrc = item['syncedLyrics']
                                     break
+                            if not synced_lrc and not plain_lrc:
+                                for item in results:
+                                    if item.get('plainLyrics'):
+                                        plain_lrc = item['plainLyrics']
+                                        break
                 except Exception:
                     pass
 
-            parsed = parse_lrc(lrc_text) if lrc_text else []
-            self.lyrics_cache[key] = parsed
+            # SE ABBIAMO TROVATO I TESTI ORIGINALI SINCRONIZZATI: USIAMO QUELLI AL 100%!
+            if synced_lrc:
+                parsed = parse_lrc(synced_lrc)
+                if parsed:
+                    self.lyrics_cache[key] = (parsed, "SYNCED")
+                    if self.current_lyrics_key == key:
+                        self.current_lyrics_lines = parsed
+                        self.current_lyrics_source = "SYNCED"
+                    self.lyrics_fetching = False
+                    return
+
+            # --- STEP 3: Fallback plainLyrics da LRCLIB auto-sincronizzato con la durata ---
+            if plain_lrc:
+                timed = auto_time_lyrics(plain_lrc, duration_sec)
+                if timed:
+                    self.lyrics_cache[key] = (timed, "AUTO_TIMED")
+                    if self.current_lyrics_key == key:
+                        self.current_lyrics_lines = timed
+                        self.current_lyrics_source = "AUTO_TIMED"
+                    self.lyrics_fetching = False
+                    return
+
+            # --- STEP 4: Fallback Genius per brani italiani o poco noti ---
+            genius_text = fetch_genius_lyrics(artist, title)
+            if genius_text:
+                timed = auto_time_lyrics(genius_text, duration_sec)
+                if timed:
+                    self.lyrics_cache[key] = (timed, "GENIUS_TIMED")
+                    if self.current_lyrics_key == key:
+                        self.current_lyrics_lines = timed
+                        self.current_lyrics_source = "GENIUS_TIMED"
+                    self.lyrics_fetching = False
+                    return
+
+            # Nessun testo reperibile
+            self.lyrics_cache[key] = ([], "NOT_FOUND")
             if self.current_lyrics_key == key:
-                self.current_lyrics_lines = parsed
+                self.current_lyrics_lines = []
+                self.current_lyrics_source = "NOT_FOUND"
             self.lyrics_fetching = False
 
         threading.Thread(target=worker, daemon=True).start()
@@ -620,8 +744,8 @@ class MusicLauncherWindow(QMainWindow):
                 QTimer.singleShot(1000, self.close)
                 return
 
-        # Leggi stato da playerctl (volume, status, player, artist, title, position)
-        vol_str, status, player, artist, title, pos_sec = get_player_metadata()
+        # Leggi stato da playerctl (volume, status, player, artist, title, position, length)
+        vol_str, status, player, artist, title, pos_sec, len_sec = get_player_metadata()
         vol_text, vol_pct = format_volume(vol_str)
 
         # Aggiorna badge volume
@@ -645,19 +769,26 @@ class MusicLauncherWindow(QMainWindow):
             # Recupera lyrics per il brano corrente
             key = (clean_a.lower().strip(), clean_t.lower().strip())
             if self.current_lyrics_key != key:
-                self.fetch_lyrics_async(clean_a, clean_t)
+                self.fetch_lyrics_hybrid_async(clean_a, clean_t, len_sec)
 
             current_lyric_line = get_current_lyric_line(self.current_lyrics_lines, pos_sec)
 
+            # Badge sorgente del testo
+            src_tag = ""
+            if self.current_lyrics_source == "SYNCED":
+                src_tag = " [Originale]"
+            elif self.current_lyrics_source in ("AUTO_TIMED", "GENIUS_TIMED"):
+                src_tag = " [Auto-Sync]"
+
             # Aggiorna label anteprima Lyrics
             if current_lyric_line:
-                self.lyrics_preview_label.setText(f'🎤 "{current_lyric_line}"')
+                self.lyrics_preview_label.setText(f'🎤{src_tag} "{current_lyric_line}"')
             elif self.current_lyrics_lines:
-                self.lyrics_preview_label.setText("🎤 [Pausa strumentale / Intro]")
+                self.lyrics_preview_label.setText(f"🎤{src_tag} [Pausa strumentale / Intro]")
             elif self.lyrics_fetching:
-                self.lyrics_preview_label.setText("🎤 Ricerca testo in corso...")
+                self.lyrics_preview_label.setText("🎤 Ricerca testo (LRCLIB & Genius)...")
             else:
-                self.lyrics_preview_label.setText("🎤 Nessun testo sincronizzato disponibile")
+                self.lyrics_preview_label.setText("🎤 Nessun testo disponibile per questo brano")
         else:
             self.track_label.setText("Nessun brano attivo")
             self.player_label.setText("Player: Non rilevato")
@@ -782,14 +913,14 @@ def main():
                 sys.exit(1)
         elif arg in ('--status', '-s'):
             running, pid = is_vrchat_running()
-            vol, st, pl, ar, ti, pos = get_player_metadata()
+            vol, st, pl, ar, ti, pos, length = get_player_metadata()
             vol_text, _ = format_volume(vol)
             print(f"VRChat: {'Attivo (PID ' + str(pid) + ')' if running else 'Non aperto'}")
             print(f"Musica: {ti} - {ar} [{st}] ({pl})")
             if vol_text:
                 print(f"Volume {pl}: {vol_text}")
             if pos is not None:
-                print(f"Posizione: {pos:.1f}s")
+                print(f"Posizione: {pos:.1f}s / {length:.1f}s" if length else f"Posizione: {pos:.1f}s")
             sys.exit(0)
         elif arg in ('--help', '-h'):
             print("Uso: music [OPZIONI]")
