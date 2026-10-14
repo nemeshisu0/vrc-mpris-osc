@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=VRChat Music OSC
-Comment=Condividi musica nella Chatbox di VRChat con tasto ON/OFF
+Comment=Condividi musica e lyrics nella Chatbox di VRChat con tasto ON/OFF
 Exec="/home/nemesy/Documents/mucis vr chart/music"
-Icon=multimedia-audio-player
+Icon=/home/nemesy/Documents/mucis vr chart/minion.png
 Terminal=false
 Type=Application
 Categories=AudioVideo;Audio;Game;
