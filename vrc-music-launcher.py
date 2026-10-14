@@ -6,20 +6,16 @@ Mini launcher grafico per trasmettere il brano in riproduzione (Spotify, browser
 il livello di volume di Spotify e i testi sincronizzati (Lyrics) nella Chatbox di VRChat via OSC (127.0.0.1:9000).
 
 Funzionalità:
-- Icona Minion personalizzata (finestra, desktop e prefisso chatbox 🍌 / 🥽).
-- Grande pulsante ON / OFF per abilitare/disabilitare l'invio al volo.
-- Selezione modalità Chatbox:
-  * Solo Titolo e Volume
-  * Solo Lyrics (Testo)
-  * Entrambi (Titolo sopra, Lyrics sotto su nuova riga)
+- Sagoma del Minion personalizzata (default: (-⊙_⊙-)) prima del titolo della canzone.
+- Download automatico delle lyrics con notifica di conferma ("Le lyrics sono giuste?").
+- Inserimento ed editing manuale dei testi tramite copia-incolla con auto-sincronizzazione.
 - Supporto testi ibrido:
-  1. Testi sincronizzati ufficiali con timestamp precisi (priorità assoluta, non modificati).
-  2. Fallback automatico su testi semplici (LRCLIB & Genius) con auto-timing distribuito sulla durata del brano.
-- Monitoraggio del livello di volume interno di Spotify.
-- Riconoscimento automatico del processo VRChat e auto-chiusura opzionale.
-- Salvataggio automatico delle impostazioni (QSettings).
-- Nessun processo orfano in background quando chiuso.
-- Supporto toggle da linea di comando / scorciatoia tastiera: `music --toggle`.
+  1. File locali manuali in ~/.config/vrc-mpris-osc/lyrics/ (priorità massima).
+  2. Testi sincronizzati ufficiali con timestamp (LRCLIB).
+  3. Auto-timing proporzionale su testi semplici (LRCLIB plainLyrics o Genius).
+- Grande pulsante ON / OFF per abilitare/disabilitare l'invio al volo.
+- Selezione modalità Chatbox: Solo Titolo, Solo Lyrics, o Entrambi (Titolo sopra, Lyrics sotto).
+- Monitoraggio volume Spotify e auto-chiusura all'uscita da VRChat.
 """
 
 import os
@@ -40,11 +36,13 @@ from PyQt6.QtCore import Qt, QTimer, QSocketNotifier, QSettings
 from PyQt6.QtGui import QFont, QColor, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QCheckBox, QFrame, QComboBox, QSizePolicy
+    QPushButton, QLabel, QCheckBox, QFrame, QComboBox, QDialog,
+    QTextEdit, QMessageBox, QSizePolicy
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else "/home/nemesy/Documents/mucis vr chart"
 MINION_ICON_PATH = os.path.join(SCRIPT_DIR, "minion.png")
+LYRICS_DIR = os.path.expanduser("~/.config/vrc-mpris-osc/lyrics")
 PID_FILE = "/tmp/vrc_music_launcher.pid"
 OSC_IP = "127.0.0.1"
 OSC_PORT = 9000
@@ -84,6 +82,10 @@ def clean_text(text: str) -> str:
     return cleaned
 
 
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]', '_', name).strip()
+
+
 def format_volume(vol_str):
     if not vol_str:
         return "", None
@@ -118,10 +120,6 @@ def parse_lrc(lrc_text: str):
 
 
 def auto_time_lyrics(plain_text: str, duration_sec: float = None):
-    """
-    Fallback: distribuisce proporzionalmente un testo semplice (non sincronizzato)
-    lungo la durata totale del brano, lasciando pause naturali per intro e outro.
-    """
     if not plain_text:
         return []
     raw_lines = [l.strip() for l in plain_text.splitlines() if l.strip()]
@@ -147,7 +145,6 @@ def auto_time_lyrics(plain_text: str, duration_sec: float = None):
 
 
 def fetch_genius_lyrics(artist: str, title: str):
-    """Cerca e scarica il testo completo da Genius per brani senza lyrics su LRCLIB."""
     query = f"{artist} {title}"
     url = "https://genius.com/api/search/multi?q=" + urllib.parse.quote(query)
     try:
@@ -256,18 +253,177 @@ def get_running_launcher_pid():
     return None
 
 
+class ManualLyricsDialog(QDialog):
+    """Finestra di dialogo per visualizzare, incollare o modificare le lyrics manualmente."""
+    def __init__(self, parent, artist: str, title: str, current_lines: list, duration_sec: float):
+        super().__init__(parent)
+        self.setWindowTitle(f"Modifica Lyrics: {title}")
+        self.resize(500, 520)
+        self.artist = artist
+        self.title = title
+        self.duration_sec = duration_sec
+        self.result_lines = None
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+                color: #cdd6f4;
+            }
+            QLabel {
+                color: #cdd6f4;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }
+            QTextEdit {
+                background-color: #181825;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 8px;
+                padding: 10px;
+                font-family: monospace;
+                font-size: 13px;
+            }
+            QPushButton {
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton#saveBtn {
+                background-color: #a6e3a1;
+                color: #11111b;
+            }
+            QPushButton#saveBtn:hover {
+                background-color: #94e2d5;
+            }
+            QPushButton#cancelBtn {
+                background-color: #313244;
+                color: #bac2de;
+                border: 1px solid #45475a;
+            }
+            QPushButton#deleteBtn {
+                background-color: #313244;
+                color: #f38ba8;
+                border: 1px solid #f38ba8;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        header = QLabel(f"✏️ Incolla o Modifica Testo per: {title}")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #f9e2af;")
+        layout.addWidget(header)
+
+        info = QLabel(
+            "Puoi incollare il testo completo copiato da internet (Google, Spotify, ecc.).\n"
+            "Se il testo non ha timestamp [00:12], verrà sincronizzato automaticamente a tempo con la musica!"
+        )
+        info.setStyleSheet("font-size: 11px; color: #a6adc8;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("Incolla qui il testo della canzone...")
+
+        # Prepopola con le lyrics esistenti se disponibili
+        if current_lines:
+            text_lines = []
+            for ts, l in current_lines:
+                mins = int(ts // 60)
+                secs = ts % 60
+                text_lines.append(f"[{mins:02d}:{secs:05.2f}] {l}")
+            self.text_edit.setPlainText("\n".join(text_lines))
+
+        layout.addWidget(self.text_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.delete_btn = QPushButton("🗑️ Rimuovi Manuale")
+        self.delete_btn.setObjectName("deleteBtn")
+        self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.clicked.connect(self.on_delete)
+        btn_row.addWidget(self.delete_btn)
+
+        btn_row.addStretch()
+
+        self.cancel_btn = QPushButton("Annulla")
+        self.cancel_btn.setObjectName("cancelBtn")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+
+        self.save_btn = QPushButton("💾 Salva e Applica")
+        self.save_btn.setObjectName("saveBtn")
+        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.clicked.connect(self.on_save)
+        btn_row.addWidget(self.save_btn)
+
+        layout.addLayout(btn_row)
+
+    def on_save(self):
+        content = self.text_edit.toPlainText().strip()
+        if not content:
+            QMessageBox.warning(self, "Attenzione", "Il testo è vuoto!")
+            return
+
+        # Verifica se ha formato LRC o è testo semplice
+        if re.search(r'\[\d+:\d+(?:\.\d+)?\]', content):
+            parsed = parse_lrc(content)
+        else:
+            parsed = auto_time_lyrics(content, self.duration_sec)
+
+        if not parsed:
+            QMessageBox.warning(self, "Errore", "Impossibile elaborare il testo inserito.")
+            return
+
+        # Salva su file locale
+        os.makedirs(LYRICS_DIR, exist_ok=True)
+        filename = f"{sanitize_filename(self.artist)} - {sanitize_filename(self.title)}.lrc"
+        file_path = os.path.join(LYRICS_DIR, filename)
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                for ts, l in parsed:
+                    mins = int(ts // 60)
+                    secs = ts % 60
+                    f.write(f"[{mins:02d}:{secs:05.2f}] {l}\n")
+        except Exception as e:
+            QMessageBox.critical(self, "Errore", f"Impossibile salvare il file: {e}")
+            return
+
+        self.result_lines = parsed
+        self.accept()
+
+    def on_delete(self):
+        filename = f"{sanitize_filename(self.artist)} - {sanitize_filename(self.title)}.lrc"
+        file_path = os.path.join(LYRICS_DIR, filename)
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        self.result_lines = "DELETED"
+        self.accept()
+
+
 class MusicLauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VRChat Music OSC Launcher (Minion Edition)")
-        self.setFixedSize(430, 650)
+        self.setFixedSize(430, 680)
 
-        # Imposta icona Minion per la finestra se presente
+        # Imposta icona grafica Minion per la finestra
         if os.path.exists(MINION_ICON_PATH):
             self.setWindowIcon(QIcon(MINION_ICON_PATH))
 
         # Gestione preferenze persistenti
         self.settings = QSettings("vrc-mpris-osc", "MusicLauncher")
+
+        # Canzoni per cui l'utente ha già confermato che le lyrics sono giuste
+        confirmed_raw = self.settings.value("confirmed_songs", [])
+        self.confirmed_songs = set(confirmed_raw) if isinstance(confirmed_raw, list) else set()
 
         self.is_on = True
         self.vrchat_detected_once = False
@@ -275,6 +431,11 @@ class MusicLauncherWindow(QMainWindow):
         self.last_sent_time = 0.0
         self.cooldown = 4.0
         self.last_detected_volume = None
+
+        # Info brano corrente
+        self.current_artist = ""
+        self.current_title = ""
+        self.current_len_sec = None
 
         # Gestione Lyrics
         self.lyrics_cache = {}  # (artist, title): (lines, source_type)
@@ -388,6 +549,19 @@ class MusicLauncherWindow(QMainWindow):
                 background-color: #45475a;
                 color: #cdd6f4;
             }
+            QPushButton#editLyricsBtn {
+                background-color: #313244;
+                color: #f9e2af;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton#editLyricsBtn:hover {
+                background-color: #45475a;
+                color: #ffffff;
+            }
             QLabel.volumeBadge {
                 background-color: #313244;
                 color: #f9e2af;
@@ -402,19 +576,24 @@ class MusicLauncherWindow(QMainWindow):
                 border-radius: 8px;
                 padding: 6px 10px;
             }
+            QFrame.notifCard {
+                background-color: #2a283e;
+                border: 1px solid #f9e2af;
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
         """)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(18, 12, 18, 12)
-        main_layout.setSpacing(9)
+        main_layout.setSpacing(8)
 
         # 1. Header con Minion Icon
         header_layout = QHBoxLayout()
         header_layout.setSpacing(10)
 
-        # Se l'immagine del Minion esiste, mostriamola in miniatura nell'header
         if os.path.exists(MINION_ICON_PATH):
             minion_img = QLabel()
             pix = QIcon(MINION_ICON_PATH).pixmap(36, 36)
@@ -423,7 +602,7 @@ class MusicLauncherWindow(QMainWindow):
 
         title_vbox = QVBoxLayout()
         title_vbox.setSpacing(1)
-        title_label = QLabel("🍌 VRChat Music OSC (Minion)")
+        title_label = QLabel("(-⊙_⊙-) VRChat Music OSC")
         title_label.setStyleSheet("font-size: 17px; font-weight: bold; color: #f9e2af;")
         subtitle_label = QLabel("Musica, Volume e Testi nella Chatbox di VRChat")
         subtitle_label.setStyleSheet("font-size: 11px; color: #a6adc8;")
@@ -438,7 +617,7 @@ class MusicLauncherWindow(QMainWindow):
         vrchat_card = QFrame()
         vrchat_card.setProperty("class", "card")
         vrchat_card_layout = QHBoxLayout(vrchat_card)
-        vrchat_card_layout.setContentsMargins(12, 7, 12, 7)
+        vrchat_card_layout.setContentsMargins(12, 6, 12, 6)
 
         self.vrchat_status_label = QLabel("○ Verifica VRChat in corso...")
         self.vrchat_status_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #9399b2;")
@@ -447,7 +626,7 @@ class MusicLauncherWindow(QMainWindow):
 
         # 3. Grande Pulsante ON / OFF
         self.toggle_btn = QPushButton()
-        self.toggle_btn.setFixedHeight(68)
+        self.toggle_btn.setFixedHeight(64)
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self.toggle_state)
         main_layout.addWidget(self.toggle_btn)
@@ -456,7 +635,7 @@ class MusicLauncherWindow(QMainWindow):
         song_card = QFrame()
         song_card.setProperty("class", "card")
         song_card_layout = QVBoxLayout(song_card)
-        song_card_layout.setContentsMargins(12, 9, 12, 9)
+        song_card_layout.setContentsMargins(12, 8, 12, 8)
         song_card_layout.setSpacing(5)
 
         card_title = QLabel("BRANO IN RIPRODUZIONE")
@@ -484,11 +663,27 @@ class MusicLauncherWindow(QMainWindow):
 
         song_card_layout.addLayout(player_row)
 
-        # Box per Anteprima Testo (Lyrics)
+        # Box per Anteprima Testo (Lyrics) con tasto per modificare/incollare
         lyrics_box = QFrame()
         lyrics_box.setProperty("class", "lyricsBox")
         lyrics_box_layout = QVBoxLayout(lyrics_box)
         lyrics_box_layout.setContentsMargins(8, 5, 8, 5)
+        lyrics_box_layout.setSpacing(4)
+
+        lyrics_top_row = QHBoxLayout()
+        lyrics_tag_label = QLabel("TESTO SINCRONIZZATO:")
+        lyrics_tag_label.setStyleSheet("font-size: 9px; font-weight: bold; color: #6c7086;")
+        lyrics_top_row.addWidget(lyrics_tag_label)
+
+        lyrics_top_row.addStretch()
+
+        self.edit_lyrics_btn = QPushButton("✏️ Modifica / Incolla")
+        self.edit_lyrics_btn.setObjectName("editLyricsBtn")
+        self.edit_lyrics_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_lyrics_btn.clicked.connect(self.open_lyrics_editor)
+        lyrics_top_row.addWidget(self.edit_lyrics_btn)
+
+        lyrics_box_layout.addLayout(lyrics_top_row)
 
         self.lyrics_preview_label = QLabel("🎤 Lyrics: In attesa di riproduzione...")
         self.lyrics_preview_label.setStyleSheet("font-size: 11px; color: #f5c2e7; font-style: italic;")
@@ -497,32 +692,72 @@ class MusicLauncherWindow(QMainWindow):
 
         song_card_layout.addWidget(lyrics_box)
 
+        # Banner Notifica per confermare o correggere le Lyrics
+        self.notif_frame = QFrame()
+        self.notif_frame.setProperty("class", "notifCard")
+        self.notif_frame.setVisible(False)
+        notif_layout = QVBoxLayout(self.notif_frame)
+        notif_layout.setContentsMargins(8, 6, 8, 6)
+        notif_layout.setSpacing(4)
+
+        self.notif_label = QLabel("🔔 Testo trovato per la prima volta. Le lyrics sono giuste?")
+        self.notif_label.setStyleSheet("font-size: 11px; font-weight: bold; color: #f9e2af;")
+        self.notif_label.setWordWrap(True)
+        notif_layout.addWidget(self.notif_label)
+
+        notif_btn_row = QHBoxLayout()
+        notif_btn_row.setSpacing(8)
+
+        self.confirm_btn = QPushButton("✅ Sì, sono giuste")
+        self.confirm_btn.setStyleSheet("background-color: #a6e3a1; color: #11111b; font-size: 11px; font-weight: bold; border-radius: 5px; padding: 4px 8px;")
+        self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confirm_btn.clicked.connect(self.confirm_current_lyrics)
+        notif_btn_row.addWidget(self.confirm_btn)
+
+        self.reject_btn = QPushButton("✏️ No / Incolla manualmente")
+        self.reject_btn.setStyleSheet("background-color: #45475a; color: #cdd6f4; font-size: 11px; border-radius: 5px; padding: 4px 8px;")
+        self.reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reject_btn.clicked.connect(self.open_lyrics_editor)
+        notif_btn_row.addWidget(self.reject_btn)
+
+        notif_btn_row.addStretch()
+        notif_layout.addLayout(notif_btn_row)
+
+        song_card_layout.addWidget(self.notif_frame)
+
         self.osc_status_label = QLabel("Stato Chatbox: In attesa")
         self.osc_status_label.setStyleSheet("font-size: 11px; color: #a6adc8; font-style: italic;")
         song_card_layout.addWidget(self.osc_status_label)
 
         main_layout.addWidget(song_card)
 
-        # 5. Selezione Modalità Chatbox e Icona Minion
+        # 5. Selezione Modalità Chatbox e Sagoma Minion
         selectors_row = QHBoxLayout()
         selectors_row.setSpacing(8)
 
-        # Selettore icona Minion
+        # Selettore Sagoma Minion (modificabile e personalizzabile, default (-⊙_⊙-))
         icon_box = QVBoxLayout()
         icon_box.setSpacing(3)
-        icon_title = QLabel("ICONA INIZIALE")
+        icon_title = QLabel("SAGOMA MINION")
         icon_title.setStyleSheet("font-size: 10px; font-weight: bold; color: #6c7086; letter-spacing: 1px;")
         icon_box.addWidget(icon_title)
 
         self.icon_combo = QComboBox()
-        self.icon_combo.addItem("🍌 Minion Banana", "🍌")
-        self.icon_combo.addItem("🥽 Occhiali Minion", "🥽")
-        self.icon_combo.addItem("🎵 Nota Classica", "🎵")
+        self.icon_combo.setEditable(True)
+        self.icon_combo.addItem("(-⊙_⊙-)")
+        self.icon_combo.addItem("(-⊙‿⊙-)")
+        self.icon_combo.addItem("(-⊙-)")
+        self.icon_combo.addItem("c(⊙_⊙)ɔ")
+        self.icon_combo.addItem("[⊙_⊙]")
+        self.icon_combo.addItem("🥽")
+        self.icon_combo.addItem("🍌")
+        self.icon_combo.addItem("🎵")
 
-        saved_icon_idx = self.settings.value("icon_choice", 0, type=int)
-        if 0 <= saved_icon_idx < self.icon_combo.count():
-            self.icon_combo.setCurrentIndex(saved_icon_idx)
-        self.icon_combo.currentIndexChanged.connect(self.on_icon_changed)
+        saved_icon_text = self.settings.value("custom_minion_text", "(-⊙_⊙-)", type=str)
+        if saved_icon_text:
+            self.icon_combo.setEditText(saved_icon_text)
+        self.icon_combo.currentTextChanged.connect(self.on_icon_text_changed)
+
         icon_box.addWidget(self.icon_combo)
         selectors_row.addLayout(icon_box, stretch=1)
 
@@ -549,7 +784,7 @@ class MusicLauncherWindow(QMainWindow):
 
         # 6. Opzioni Checkbox
         options_layout = QVBoxLayout()
-        options_layout.setSpacing(5)
+        options_layout.setSpacing(4)
 
         saved_vol = self.settings.value("show_volume", True, type=bool)
         self.show_volume_chk = QCheckBox("🔊 Includi percentuale volume (es. 🔉 46%)")
@@ -589,12 +824,12 @@ class MusicLauncherWindow(QMainWindow):
 
         main_layout.addLayout(bottom_layout)
 
-    def get_current_song_icon(self) -> str:
-        data = self.icon_combo.currentData()
-        return data if data else "🍌"
+    def get_current_minion_prefix(self) -> str:
+        text = self.icon_combo.currentText().strip()
+        return text if text else "(-⊙_⊙-)"
 
-    def on_icon_changed(self, index):
-        self.settings.setValue("icon_choice", index)
+    def on_icon_text_changed(self, text):
+        self.settings.setValue("custom_minion_text", text)
         self.last_sent_text = None
         self.on_tick()
 
@@ -660,11 +895,85 @@ class MusicLauncherWindow(QMainWindow):
             self.last_sent_text = None
             self.on_tick()
 
+    def confirm_current_lyrics(self):
+        """L'utente conferma che le lyrics scaricate sono giuste."""
+        if self.current_lyrics_key:
+            self.confirmed_songs.add(self.current_lyrics_key)
+            self.settings.setValue("confirmed_songs", list(self.confirmed_songs))
+        self.notif_frame.setVisible(False)
+
+    def open_lyrics_editor(self):
+        """Apre la finestra per incollare o modificare le lyrics."""
+        dlg = ManualLyricsDialog(
+            self,
+            self.current_artist,
+            self.current_title,
+            self.current_lyrics_lines,
+            self.current_len_sec or 180.0
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            key = (self.current_artist.lower().strip(), self.current_title.lower().strip())
+            if dlg.result_lines == "DELETED":
+                if key in self.lyrics_cache:
+                    del self.lyrics_cache[key]
+                self.current_lyrics_key = None
+                self.notif_frame.setVisible(False)
+                self.on_tick()
+            elif dlg.result_lines:
+                self.lyrics_cache[key] = (dlg.result_lines, "MANUALE")
+                self.current_lyrics_lines = dlg.result_lines
+                self.current_lyrics_source = "MANUALE"
+                self.confirmed_songs.add(key)
+                self.settings.setValue("confirmed_songs", list(self.confirmed_songs))
+                self.notif_frame.setVisible(False)
+                self.last_sent_text = None
+                self.on_tick()
+
+    def check_local_lyrics(self, artist: str, title: str, duration_sec: float):
+        """Verifica se esiste un file .lrc o .txt personalizzato salvato nella cartella locale."""
+        if not os.path.exists(LYRICS_DIR):
+            return None
+        candidates = [
+            f"{sanitize_filename(artist)} - {sanitize_filename(title)}.lrc",
+            f"{sanitize_filename(title)} - {sanitize_filename(artist)}.lrc",
+            f"{sanitize_filename(title)}.lrc",
+            f"{sanitize_filename(artist)} - {sanitize_filename(title)}.txt",
+            f"{sanitize_filename(title)}.txt",
+        ]
+        for filename in candidates:
+            path = os.path.join(LYRICS_DIR, filename)
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    if re.search(r'\[\d+:\d+(?:\.\d+)?\]', content):
+                        parsed = parse_lrc(content)
+                    else:
+                        parsed = auto_time_lyrics(content, duration_sec)
+                    if parsed:
+                        return parsed
+                except Exception:
+                    pass
+        return None
+
     def fetch_lyrics_hybrid_async(self, artist: str, title: str, duration_sec: float = None):
         key = (artist.lower().strip(), title.lower().strip())
+
+        # 1. Controlla prima la cache in memoria
         if key in self.lyrics_cache:
             self.current_lyrics_key = key
             self.current_lyrics_lines, self.current_lyrics_source = self.lyrics_cache[key]
+            self.update_notification_banner(key)
+            return
+
+        # 2. Controlla se l'utente ha salvato un file manuale locale
+        local_lines = self.check_local_lyrics(artist, title, duration_sec)
+        if local_lines:
+            self.lyrics_cache[key] = (local_lines, "MANUALE")
+            self.current_lyrics_key = key
+            self.current_lyrics_lines = local_lines
+            self.current_lyrics_source = "MANUALE"
+            self.notif_frame.setVisible(False)
             return
 
         if self.lyrics_fetching:
@@ -674,12 +983,13 @@ class MusicLauncherWindow(QMainWindow):
         self.current_lyrics_lines = []
         self.current_lyrics_source = "SEARCHING"
         self.lyrics_fetching = True
+        self.notif_frame.setVisible(False)
 
         def worker():
             synced_lrc = None
             plain_lrc = None
 
-            # 1. LRCLIB match esatto per syncedLyrics (massima precisione, mai toccato)
+            # LRCLIB match esatto per syncedLyrics
             try:
                 params = urllib.parse.urlencode({'track_name': title, 'artist_name': artist})
                 url = f"https://lrclib.net/api/get?{params}"
@@ -693,7 +1003,7 @@ class MusicLauncherWindow(QMainWindow):
             except Exception:
                 pass
 
-            # 2. LRCLIB ricerca libera (privilegiando sempre syncedLyrics)
+            # LRCLIB ricerca libera
             if not synced_lrc:
                 try:
                     q = urllib.parse.urlencode({'q': f"{artist} {title}"})
@@ -724,7 +1034,7 @@ class MusicLauncherWindow(QMainWindow):
                     self.lyrics_fetching = False
                     return
 
-            # 3. Fallback plainLyrics da LRCLIB auto-sincronizzato con la durata
+            # Fallback plainLyrics da LRCLIB auto-sincronizzato con la durata
             if plain_lrc:
                 timed = auto_time_lyrics(plain_lrc, duration_sec)
                 if timed:
@@ -735,7 +1045,7 @@ class MusicLauncherWindow(QMainWindow):
                     self.lyrics_fetching = False
                     return
 
-            # 4. Fallback Genius per brani italiani o poco noti
+            # Fallback Genius per brani italiani o poco noti
             genius_text = fetch_genius_lyrics(artist, title)
             if genius_text:
                 timed = auto_time_lyrics(genius_text, duration_sec)
@@ -754,6 +1064,29 @@ class MusicLauncherWindow(QMainWindow):
             self.lyrics_fetching = False
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def update_notification_banner(self, key):
+        """Mostra la notifica se è la prima volta che si scaricano le lyrics per questo brano."""
+        if not self.current_title:
+            self.notif_frame.setVisible(False)
+            return
+
+        if key in self.confirmed_songs or self.current_lyrics_source in ("MANUALE", "NONE", "SEARCHING"):
+            self.notif_frame.setVisible(False)
+            return
+
+        if self.current_lyrics_lines:
+            self.notif_label.setText(f"🔔 Testo trovato per '{self.current_title}'. Le lyrics sono giuste?")
+            self.confirm_btn.setVisible(True)
+            self.reject_btn.setText("✏️ No / Incolla manualmente")
+            self.notif_frame.setVisible(True)
+        elif self.current_lyrics_source == "NOT_FOUND":
+            self.notif_label.setText(f"⚠️ Nessun testo trovato per '{self.current_title}'.")
+            self.confirm_btn.setVisible(False)
+            self.reject_btn.setText("📋 Incolla Testo Manuale")
+            self.notif_frame.setVisible(True)
+        else:
+            self.notif_frame.setVisible(False)
 
     def send_chatbox(self, text: str):
         try:
@@ -800,6 +1133,10 @@ class MusicLauncherWindow(QMainWindow):
             clean_a = clean_text(artist) if artist else ""
             display_title = f"{clean_t} - {clean_a}" if clean_a else clean_t
 
+            self.current_artist = clean_a
+            self.current_title = clean_t
+            self.current_len_sec = len_sec
+
             icon = "▶" if status.lower() == "playing" else "⏸"
             self.track_label.setText(f"{icon} {display_title}")
             self.player_label.setText(f"Player: {player.capitalize()} ({status.capitalize()})")
@@ -810,8 +1147,14 @@ class MusicLauncherWindow(QMainWindow):
 
             current_lyric_line = get_current_lyric_line(self.current_lyrics_lines, pos_sec)
 
+            # Aggiorna il banner di notifica se il download è terminato
+            if not self.lyrics_fetching:
+                self.update_notification_banner(key)
+
             src_tag = ""
-            if self.current_lyrics_source == "SYNCED":
+            if self.current_lyrics_source == "MANUALE":
+                src_tag = " [Manuale]"
+            elif self.current_lyrics_source == "SYNCED":
                 src_tag = " [Originale]"
             elif self.current_lyrics_source in ("AUTO_TIMED", "GENIUS_TIMED"):
                 src_tag = " [Auto-Sync]"
@@ -828,6 +1171,7 @@ class MusicLauncherWindow(QMainWindow):
             self.track_label.setText("Nessun brano attivo")
             self.player_label.setText("Player: Non rilevato")
             self.lyrics_preview_label.setText("🎤 Lyrics: In attesa di riproduzione...")
+            self.notif_frame.setVisible(False)
 
         if not self.is_on:
             return
@@ -842,13 +1186,13 @@ class MusicLauncherWindow(QMainWindow):
             clean_a = clean_text(artist) if artist else ""
             song_part = f"{clean_t} - {clean_a}" if clean_a else clean_t
 
-            # Icona iniziale (Minion Banana 🍌 di default!)
-            prefix_icon = self.get_current_song_icon()
+            # Sagoma Minion personalizzata (default: (-⊙_⊙-))
+            minion_prefix = self.get_current_minion_prefix()
 
             if self.show_volume_chk.isChecked() and vol_text:
-                title_msg = f"{prefix_icon} {song_part} [{vol_text}]"
+                title_msg = f"{minion_prefix} {song_part} [{vol_text}]"
             else:
-                title_msg = f"{prefix_icon} {song_part}"
+                title_msg = f"{minion_prefix} {song_part}"
 
             mode = self.mode_combo.currentIndex()
 
@@ -953,7 +1297,7 @@ def main():
             sys.exit(0)
         elif arg in ('--help', '-h'):
             print("Uso: music [OPZIONI]")
-            print("  (senza opzioni)    Apre il mini-launcher grafico con icona Minion, volume e lyrics")
+            print("  (senza opzioni)    Apre il mini-launcher grafico con sagoma Minion, volume e lyrics")
             print("  --toggle, -t       Abilita o disabilita al volo il launcher già aperto")
             print("  --status, -s       Mostra lo stato di VRChat, musica, volume e posizione")
             print("  --help, -h         Mostra questo messaggio di aiuto")
